@@ -195,8 +195,27 @@ func (s *Server) relay(w http.ResponseWriter, resp *http.Response, a router.Atte
 		w.Header().Del(h)
 	}
 	w.Header().Set(HeaderProvider, a.Provider.Name)
-	w.WriteHeader(resp.StatusCode)
 	rc := http.NewResponseController(w)
+	note := usageNote{Provider: a.Provider.Name, UpstreamModel: a.Model}
+	switch {
+	case resp.StatusCode != http.StatusOK:
+	case isEventStream(resp.Header):
+		w.Header().Del("Content-Length")
+		w.WriteHeader(resp.StatusCode)
+		annotateStream(w, func() { _ = rc.Flush() }, resp.Body, note)
+		return
+	case isJSON(resp.Header):
+		body, err := io.ReadAll(resp.Body)
+		if err != nil {
+			return
+		}
+		body = annotateJSON(body, note)
+		w.Header().Set("Content-Length", strconv.Itoa(len(body)))
+		w.WriteHeader(resp.StatusCode)
+		_, _ = w.Write(body)
+		return
+	}
+	w.WriteHeader(resp.StatusCode)
 	buf := make([]byte, 32<<10)
 	for {
 		n, err := resp.Body.Read(buf)

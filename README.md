@@ -38,8 +38,9 @@ started streaming always finishes where it started.
 - **Stays local when you want it to:** clients or single requests can opt out of the cloud and wait for local.
 - **Survives the cloud saying no:** out of credits, bad key, rate limited or down? The request falls back to
   waiting for local, and gridtie skips that provider for a while.
-- **Observable:** every response says which provider answered (`X-Gridtie-Provider`), and there are Prometheus
-  metrics and a `/status` page.
+- **Observable:** every response says which provider answered, in the `X-Gridtie-Provider` header and in the
+  response's `usage` (`provider`, `upstream_model`). Clients that show usage, like open-webui's ⓘ icon under each
+  reply, show it too. There are also Prometheus metrics and a `/status` page.
 
 ## Quick start
 

@@ -1,0 +1,80 @@
+# Example: gridtie in front of llama-swap with OpenRouter as the fallback.
+# Create the key first: kubectl -n gridtie create secret generic gridtie-openrouter --from-literal=OPENROUTER_API_KEY=...
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: gridtie
+---
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: gridtie
+  namespace: gridtie
+data:
+  config.yaml: |
+    wakeOnModels: true
+    providers:
+      local:
+        baseURL: http://llama-swap.llama-swap.svc:8080/v1
+        readiness:
+          llamaSwap: http://llama-swap.llama-swap.svc:8080
+      openrouter:
+        baseURL: https://openrouter.ai/api/v1
+        apiKeyEnv: OPENROUTER_API_KEY
+    models:
+      qwen3-coder:
+        aliases: [coder]
+        routes:
+          - {provider: local, model: qwen3-coder}
+          - {provider: openrouter, model: qwen/qwen3-coder}
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: gridtie
+  namespace: gridtie
+spec:
+  replicas: 1
+  selector:
+    matchLabels: {app: gridtie}
+  template:
+    metadata:
+      labels: {app: gridtie}
+    spec:
+      securityContext:
+        runAsNonRoot: true
+        seccompProfile: {type: RuntimeDefault}
+      containers:
+        - name: gridtie
+          image: ghcr.io/tpural/gridtie:latest
+          envFrom:
+            - secretRef: {name: gridtie-openrouter}
+          ports:
+            - {name: http, containerPort: 8080}
+            - {name: admin, containerPort: 9090}
+          readinessProbe:
+            httpGet: {path: /healthz, port: admin}
+          livenessProbe:
+            httpGet: {path: /healthz, port: admin}
+          resources:
+            requests: {cpu: 10m, memory: 32Mi}
+          securityContext:
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: true
+            capabilities: {drop: [ALL]}
+          volumeMounts:
+            - {name: config, mountPath: /etc/gridtie}
+      volumes:
+        - name: config
+          configMap: {name: gridtie}
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: gridtie
+  namespace: gridtie
+spec:
+  selector: {app: gridtie}
+  ports:
+    - {name: http, port: 8080, targetPort: http}
+    - {name: admin, port: 9090, targetPort: admin}

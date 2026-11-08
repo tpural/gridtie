@@ -42,6 +42,9 @@ type Readiness struct {
 	// LlamaSwap is a llama-swap base URL; a model is ready when GET /running
 	// lists it as "ready". Point it past anything that would wake the backend.
 	LlamaSwap string `json:"llamaSwap,omitempty"`
+	// Slots treats a loaded model as busy when every llama-server slot is
+	// processing, so new requests fall back instead of queueing.
+	Slots bool `json:"slots,omitempty"`
 }
 
 // Wake is called, at most every 30 seconds, when a preferred provider is down.
@@ -63,6 +66,9 @@ type Model struct {
 type Route struct {
 	Provider string `json:"provider"`
 	Model    string `json:"model"`
+	// MaxContext is the route's context window in tokens. Requests estimated
+	// to need more skip the route. Zero means no limit.
+	MaxContext int `json:"maxContext,omitempty"`
 }
 
 // Rule matches requests by Host, client CIDR or header. Matching requests with
@@ -130,6 +136,9 @@ func (c *Config) validate() error {
 		if p.APIKeyEnv != "" && os.Getenv(p.APIKeyEnv) == "" {
 			errs = append(errs, fmt.Errorf("provider %s: %s is not set", name, p.APIKeyEnv))
 		}
+		if p.Readiness != nil && p.Readiness.Slots && p.Readiness.LlamaSwap == "" {
+			errs = append(errs, fmt.Errorf("provider %s: readiness.slots needs llamaSwap", name))
+		}
 		if p.Wake != nil && p.Wake.URL == "" {
 			errs = append(errs, fmt.Errorf("provider %s: wake needs a url", name))
 		}
@@ -148,6 +157,9 @@ func (c *Config) validate() error {
 			}
 			if r.Model == "" {
 				errs = append(errs, fmt.Errorf("model %s: route to %s has no model", id, r.Provider))
+			}
+			if r.MaxContext < 0 {
+				errs = append(errs, fmt.Errorf("model %s: route to %s has a negative maxContext", id, r.Provider))
 			}
 		}
 		for _, name := range append([]string{id}, m.Aliases...) {

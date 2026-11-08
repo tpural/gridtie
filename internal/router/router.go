@@ -91,12 +91,18 @@ func (r *Router) LocalOnly(req *http.Request) bool {
 	return false
 }
 
-// Plan returns the providers to try, in order. Ready routes come first in
-// preference order, skipping providers that are cooling down; the preferred
-// route is always last if it isn't first, so the request waits for it when
-// everything else fails. A preferred route that isn't ready is woken.
-func (r *Router) Plan(ctx context.Context, m *Model, localOnly bool) []Attempt {
-	first := m.Routes[0]
+// Plan returns the providers to try, in order. Routes whose context window is
+// too small for tokens are dropped, unless none is big enough. Ready routes come
+// first in preference order, skipping providers that are cooling down; the
+// preferred route is always last if it isn't first, so the request waits for it
+// when everything else fails. A preferred route that isn't ready is woken.
+// localOnly sends the request to the model's first route, whatever its state.
+func (r *Router) Plan(ctx context.Context, m *Model, localOnly bool, tokens int) []Attempt {
+	routes := m.Routes
+	if !localOnly {
+		routes = fitting(routes, tokens)
+	}
+	first := routes[0]
 	fp := r.providers[first.Provider]
 	state := fp.State(ctx, first.Model)
 	if state != provider.Ready {
@@ -110,7 +116,7 @@ func (r *Router) Plan(ctx context.Context, m *Model, localOnly bool) []Attempt {
 	if cooling, _, _ := fp.Cooling(); state == provider.Ready && !cooling {
 		out = append(out, preferred)
 	}
-	for _, rt := range m.Routes[1:] {
+	for _, rt := range routes[1:] {
 		p := r.providers[rt.Provider]
 		if cooling, _, _ := p.Cooling(); cooling {
 			continue
@@ -121,6 +127,19 @@ func (r *Router) Plan(ctx context.Context, m *Model, localOnly bool) []Attempt {
 	}
 	if len(out) == 0 || out[0].Provider != fp || out[0].Model != first.Model {
 		out = append(out, preferred)
+	}
+	return out
+}
+
+func fitting(routes []config.Route, tokens int) []config.Route {
+	var out []config.Route
+	for _, rt := range routes {
+		if rt.MaxContext == 0 || tokens <= rt.MaxContext {
+			out = append(out, rt)
+		}
+	}
+	if len(out) == 0 {
+		return routes
 	}
 	return out
 }

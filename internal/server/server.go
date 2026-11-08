@@ -110,9 +110,12 @@ func (s *Server) forward(w http.ResponseWriter, r *http.Request, path string) {
 		apiError(w, http.StatusNotFound, "model "+strconv.Quote(name)+" does not exist")
 		return
 	}
-	localOnly := s.opts.Router.LocalOnly(r)
-	attempts := s.opts.Router.Plan(r.Context(), m, localOnly)
-	log := s.opts.Log.With("model", m.ID, "localOnly", localOnly)
+	// Vectors from different models can't be compared, so embeddings never
+	// fall back: one batch from another model would corrupt an index.
+	localOnly := path == "/embeddings" || s.opts.Router.LocalOnly(r)
+	tokens := estimateTokens(fields)
+	attempts := s.opts.Router.Plan(r.Context(), m, localOnly, tokens)
+	log := s.opts.Log.With("model", m.ID, "localOnly", localOnly, "tokens", tokens)
 
 	var skipped []string
 	for i, a := range attempts {

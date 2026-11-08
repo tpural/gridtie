@@ -33,6 +33,8 @@ type upstream struct {
 	leaked   bool
 	release  chan struct{}
 	streamed bool
+	busy     bool
+	paths    []string
 }
 
 func newUpstream(t *testing.T, name string) *upstream {
@@ -57,10 +59,16 @@ func newUpstream(t *testing.T, name string) *upstream {
 		u.warmed = append(u.warmed, r.PathValue("model"))
 		u.mu.Unlock()
 	})
-	mux.HandleFunc("POST /chat/completions", func(w http.ResponseWriter, r *http.Request) {
+	mux.HandleFunc("GET /upstream/{model}/slots", func(w http.ResponseWriter, _ *http.Request) {
+		u.mu.Lock()
+		defer u.mu.Unlock()
+		_, _ = fmt.Fprintf(w, `[{"id":0,"is_processing":%t}]`, u.busy)
+	})
+	mux.HandleFunc("POST /", func(w http.ResponseWriter, r *http.Request) {
 		var body map[string]any
 		_ = json.NewDecoder(r.Body).Decode(&body)
 		u.mu.Lock()
+		u.paths = append(u.paths, r.URL.Path)
 		u.bodies = append(u.bodies, body)
 		u.auth = append(u.auth, r.Header.Get("Authorization"))
 		u.leaked = u.leaked || r.Header.Get("X-Gridtie-Route") != ""
@@ -107,7 +115,7 @@ func newHarness(t *testing.T, extra string) *harness {
 providers:
   local:
     baseURL: %[1]s
-    readiness: {llamaSwap: %[1]s}
+    readiness: {llamaSwap: %[1]s, slots: true}
     wake: {url: %[2]s}
   cloud:
     baseURL: %[3]s
@@ -144,8 +152,11 @@ models:
 }
 
 func (h *harness) chat(model string, header ...string) *httptest.ResponseRecorder {
-	req := httptest.NewRequest(http.MethodPost, "/v1/chat/completions",
-		strings.NewReader(`{"model":"`+model+`","messages":[{"role":"user","content":"hi"}],"tools":[{"type":"function","function":{"name":"f"}}],"temperature":0.2}`))
+	return h.post("/v1/chat/completions", `{"model":"`+model+`","messages":[{"role":"user","content":"hi"}],"tools":[{"type":"function","function":{"name":"f"}}],"temperature":0.2}`, header...)
+}
+
+func (h *harness) post(path, body string, header ...string) *httptest.ResponseRecorder {
+	req := httptest.NewRequest(http.MethodPost, path, strings.NewReader(body))
 	req.RemoteAddr = "10.0.0.7:5000"
 	for i := 0; i+1 < len(header); i += 2 {
 		req.Header.Set(header[i], header[i+1])
@@ -321,5 +332,76 @@ func TestUnknownModel(t *testing.T) {
 	h := newHarness(t, "")
 	if rec := h.chat("nope"); rec.Code != http.StatusNotFound || !strings.Contains(rec.Body.String(), "does not exist") {
 		t.Fatalf("got %d %s", rec.Code, rec.Body)
+	}
+}
+
+func TestEmbeddingsNeverFallBack(t *testing.T) {
+	h := newHarness(t, "")
+	assertFrom(t, h.post("/v1/embeddings", `{"model":"coder","input":"hi"}`), "local")
+	h.wokeTimes(1)
+	if h.cloud.calls() != 0 || h.local.paths[0] != "/embeddings" {
+		t.Fatalf("cloud calls = %d, local paths = %v", h.cloud.calls(), h.local.paths)
+	}
+}
+
+func TestLongRequestsSkipSmallRoutes(t *testing.T) {
+	h := newHarness(t, `
+  long:
+    routes:
+      - {provider: local, model: coder-local, maxContext: 100}
+      - {provider: cloud, model: vendor/coder}
+  tiny:
+    routes:
+      - {provider: local, model: coder-local, maxContext: 10}
+      - {provider: cloud, model: vendor/coder, maxContext: 10}`)
+	h.local.running = map[string]string{"coder-local": "ready"}
+	long := `{"model":"%s","messages":[{"role":"user","content":[{"type":"text","text":"` + strings.Repeat("x", 600) + `"}]}]}`
+	assertFrom(t, h.post("/v1/chat/completions", fmt.Sprintf(long, "long")), "cloud")
+	assertFrom(t, h.post("/v1/chat/completions", `{"model":"long","messages":[{"role":"user","content":"hi"}]}`), "local")
+	assertFrom(t, h.post("/v1/chat/completions", `{"model":"long","max_tokens":500}`), "cloud")
+	assertFrom(t, h.post("/v1/chat/completions", fmt.Sprintf(long, "tiny")), "local")
+
+	h.wokeTimes(0)
+}
+
+func TestLongRequestsDoNotWakeTooSmallRoutes(t *testing.T) {
+	h := newHarness(t, `
+  long:
+    routes:
+      - {provider: local, model: coder-local, maxContext: 10}
+      - {provider: cloud, model: vendor/coder}`)
+	assertFrom(t, h.post("/v1/chat/completions", `{"model":"long","max_tokens":500}`), "cloud")
+	h.wokeTimes(0)
+}
+
+func TestBusyLocalFallsBack(t *testing.T) {
+	h := newHarness(t, "")
+	h.local.running = map[string]string{"coder-local": "ready"}
+	h.local.busy = true
+	assertFrom(t, h.chat("coder"), "cloud")
+	assertFrom(t, h.chat("coder", "X-Gridtie-Route", "wait"), "local")
+	h.wokeTimes(0)
+	h.local.mu.Lock()
+	defer h.local.mu.Unlock()
+	if len(h.local.warmed) != 0 {
+		t.Fatalf("busy model was warmed: %v", h.local.warmed)
+	}
+}
+
+func TestEstimateTokens(t *testing.T) {
+	tests := map[string]int{
+		`{"messages":[{"content":"abcdef"}]}`: 6,
+		`{"messages":[{"content":[{"type":"text","text":"abc"},{"type":"image_url","image_url":{"url":"data:xxxxxxxx"}}]}]}`: 5,
+		`{"prompt":["abc","abc"],"max_tokens":10}`:   12,
+		`{"prompt":"abc","max_completion_tokens":7}`: 8,
+	}
+	for body, want := range tests {
+		var fields map[string]json.RawMessage
+		if err := json.Unmarshal([]byte(body), &fields); err != nil {
+			t.Fatal(err)
+		}
+		if got := estimateTokens(fields); got != want {
+			t.Errorf("estimateTokens(%s) = %d, want %d", body, got, want)
+		}
 	}
 }

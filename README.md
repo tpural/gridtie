@@ -37,6 +37,8 @@ started streaming always finishes where it started.
   answers. Supports [llama-swap](https://github.com/mostlygeek/llama-swap) today.
 - **Wake hooks:** calls a URL to start the local side (a scale-to-zero proxy, a Wake-on-LAN service, …), and
   asks llama-swap to load the requested model.
+- **Knows when local can't take it:** a conversation too long for the local context window, or a local server
+  whose slots are all busy, goes to the cloud instead of failing or queueing.
 - **Stays local when you want it to:** clients or single requests can opt out of the cloud and wait for local.
 - **Survives the cloud saying no:** out of credits, bad key, rate limited or down? The request falls back to
   waiting for local, and gridtie skips that provider for a while.
@@ -78,14 +80,20 @@ Point your client at `http://localhost:8080/v1`. A Kubernetes example is in [doc
 ## How a request is routed
 
 1. The `model` is looked up by ID or alias. Unknown models get a 404.
-2. Routes are checked in order. The first one whose provider is **ready for that model** and isn't cooling
-   down wins. Providers without a `readiness` check are always ready.
-3. If the preferred (first) route was skipped, gridtie wakes it in the background, at most every 30 seconds:
+2. Routes whose `maxContext` is smaller than the request are dropped (unless none is big enough). The size is
+   estimated from the text, tools and `max_tokens`, at about 3 characters per token.
+3. The remaining routes are checked in order. The first one whose provider is **ready for that model**, isn't
+   busy and isn't cooling down wins. Providers without a `readiness` check are always ready.
+4. If the preferred (first) route was skipped, gridtie wakes it in the background, at most every 30 seconds:
    - if the provider is down, it calls the `wake` hook;
    - if it is up with a different model loaded, it asks llama-swap to load the requested one.
-4. If a provider rejects the request (`401`, `402`, `403`, `429` or `5xx`) or can't be reached, the next route
+5. If a provider rejects the request (`401`, `402`, `403`, `429` or `5xx`) or can't be reached, the next route
    is tried. Nothing has been sent to the client yet, so this is invisible.
-5. The preferred route is always the last resort: when nothing else can answer, the request goes there and waits.
+6. The preferred route is always the last resort: when nothing else can answer, the request goes there and waits.
+
+**Embeddings never fall back.** Vectors from different models can't be compared, so one batch embedded by
+another model would quietly break a search index. `/v1/embeddings` always goes to the model's first route and
+waits for it.
 
 Only the `model` field of the request body is changed. Messages, tools, images and every other field
 are forwarded untouched.
@@ -129,9 +137,10 @@ as long as local eventually comes up.
 | `providers.<name>.apiKeyEnv` | | Environment variable holding the API key, sent as a Bearer token. Without one, the client's `Authorization` header is forwarded. |
 | `providers.<name>.headers` | | Extra request headers, e.g. OpenRouter's `HTTP-Referer` |
 | `providers.<name>.readiness.llamaSwap` | | llama-swap base URL, used for `GET /running`. Use an address that doesn't wake anything. |
+| `providers.<name>.readiness.slots` | `false` | Treat a loaded model as busy when every llama-server slot is processing (`/upstream/<model>/slots`), so requests go elsewhere instead of queueing |
 | `providers.<name>.wake.url` / `.method` | `POST` | Called when the provider is down and preferred |
 | `models.<id>.name` / `.aliases` | | Display name and other IDs clients may use |
-| `models.<id>.routes[]` | | `{provider, model}` in order of preference, where `model` is the provider's own model ID |
+| `models.<id>.routes[]` | | `{provider, model, maxContext}` in order of preference, where `model` is the provider's own model ID and `maxContext` (optional) its context window in tokens |
 | `rules[]` | | One of `host`, `cidr`, `header` (`Name=regexp`), plus `localOnly` |
 
 **Metrics:**

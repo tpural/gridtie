@@ -38,11 +38,17 @@ func TestParseDefaults(t *testing.T) {
 
 func TestParseErrors(t *testing.T) {
 	tests := map[string]struct{ edit func(string) string }{
-		"is not set":           {func(s string) string { return s }},
-		"unknown provider":     {func(s string) string { return strings.Replace(s, "provider: cloud", "provider: nope", 1) }},
-		"also used by":         {func(s string) string { return strings.Replace(s, "[coding]", "[coder]", 1) }},
-		"exactly one":          {func(s string) string { return strings.Replace(s, `{header:`, `{cidr: 10.0.0.0/8, header:`, 1) }},
-		"is not a URL":         {func(s string) string { return strings.Replace(s, "http://llama:8080/v1", "llama", 1) }},
+		"is not set":       {func(s string) string { return s }},
+		"unknown provider": {func(s string) string { return strings.Replace(s, "provider: cloud", "provider: nope", 1) }},
+		"also used by":     {func(s string) string { return strings.Replace(s, "[coding]", "[coder]", 1) }},
+		"exactly one":      {func(s string) string { return strings.Replace(s, `{header:`, `{cidr: 10.0.0.0/8, header:`, 1) }},
+		"is not a URL":     {func(s string) string { return strings.Replace(s, "http://llama:8080/v1", "llama", 1) }},
+		"needs llamaSwap": {func(s string) string {
+			return strings.Replace(s, "apiKeyEnv: TEST_KEY", "apiKeyEnv: TEST_KEY\n    readiness: {slots: true}", 1)
+		}},
+		"negative maxContext": {func(s string) string {
+			return strings.Replace(s, "model: vendor/coder}", "model: vendor/coder, maxContext: -1}", 1)
+		}},
 		`unknown field "tyop"`: {func(s string) string { return s + "tyop: 1\n" }},
 	}
 	for want, tt := range tests {

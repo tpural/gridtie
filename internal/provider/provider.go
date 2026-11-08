@@ -23,6 +23,8 @@ type State string
 const (
 	// Ready can answer now.
 	Ready State = "ready"
+	// Busy has the model loaded, but every slot is processing.
+	Busy State = "busy"
 	// Starting is loading the model.
 	Starting State = "starting"
 	// Idle is up but has a different model loaded.
@@ -46,6 +48,7 @@ type Provider struct {
 	Headers map[string]string
 
 	llamaSwap *url.URL
+	slots     bool
 	wake      *config.Wake
 	client    *http.Client
 	log       *slog.Logger
@@ -83,6 +86,7 @@ func New(name string, c config.Provider, client *http.Client, log *slog.Logger) 
 		if p.llamaSwap, err = url.Parse(strings.TrimRight(c.Readiness.LlamaSwap, "/")); err != nil {
 			return nil, err
 		}
+		p.slots = c.Readiness.Slots
 	}
 	return p, nil
 }
@@ -105,6 +109,8 @@ func (p *Provider) State(ctx context.Context, model string) State {
 	switch p.running[model] {
 	case "ready":
 		return Ready
+	case "busy":
+		return Busy
 	case "starting":
 		return Starting
 	default:
@@ -136,8 +142,41 @@ func (p *Provider) fetchRunning(ctx context.Context) (map[string]string, bool) {
 	out := make(map[string]string, len(body.Running))
 	for _, m := range body.Running {
 		out[m.Model] = m.State
+		// Only ask loaded models, right after /running: asking another one
+		// would make llama-swap load it.
+		if p.slots && m.State == "ready" && p.slotsFull(ctx, m.Model) {
+			out[m.Model] = "busy"
+		}
 	}
 	return out, true
+}
+
+// slotsFull reports whether every llama-server slot of a loaded model is
+// processing. Errors count as not full.
+func (p *Provider) slotsFull(ctx context.Context, model string) bool {
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, p.llamaSwap.String()+"/upstream/"+url.PathEscape(model)+"/slots", http.NoBody)
+	if err != nil {
+		return false
+	}
+	resp, err := p.client.Do(req)
+	if err != nil {
+		return false
+	}
+	defer resp.Body.Close()
+	var slots []struct {
+		IsProcessing *bool `json:"is_processing"`
+		State        *int  `json:"state"`
+	}
+	if resp.StatusCode != http.StatusOK || json.NewDecoder(resp.Body).Decode(&slots) != nil || len(slots) == 0 {
+		return false
+	}
+	for _, s := range slots {
+		busy := (s.IsProcessing != nil && *s.IsProcessing) || (s.IsProcessing == nil && s.State != nil && *s.State != 0)
+		if !busy {
+			return false
+		}
+	}
+	return true
 }
 
 // Wake nudges the provider towards serving model, in the background and at most

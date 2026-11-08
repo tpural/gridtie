@@ -1,3 +1,5 @@
+<p align="center"><img src="docs/logo.png" alt="gridtie" width="160"></p>
+
 # gridtie
 
 **Local-first LLM routing.** gridtie sits in front of your model providers and answers every request from
